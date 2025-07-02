@@ -212,40 +212,188 @@ class EnhancedNFLScraperWithCSV {
      * Scrape NFL conference standings for a specific year
      */
     async scrapeNFLStandingsForYear(year) {
-        console.log(`\n🏈 Scraping ${year} NFL standings from NFL.com...`);
+        console.log(`\n🏈 Scraping ${year} NFL standings from multiple sources...`);
         
+        // Try multiple sources for comprehensive data
+        let standings = await this.scrapeWikipediaStandings(year);
+        
+        if (!standings || standings.afc.length === 0 || standings.nfc.length === 0) {
+            console.log(`⚠️ Wikipedia incomplete for ${year}, trying NFL.com...`);
+            standings = await this.scrapeNFLStandingsFromNFLCom(year);
+        }
+        
+        if (!standings || standings.afc.length === 0 || standings.nfc.length === 0) {
+            console.log(`⚠️ NFL.com incomplete for ${year}, trying Pro Football Reference...`);
+            standings = await this.scrapeProFootballReference(year);
+        }
+        
+        // Ensure all Super Bowl winners are included
+        standings = await this.ensureSuperBowlWinnerIncluded(year, standings);
+        
+        console.log(`✅ Found ${standings.afc.length} AFC teams and ${standings.nfc.length} NFC teams for ${year}`);
+        return standings;
+    }
+
+    async scrapeWikipediaStandings(year) {
         try {
+            console.log(`� Trying Wikipedia for ${year}...`);
+            const url = `https://en.wikipedia.org/wiki/${year}_NFL_season`;
+            
+            await this.page.goto(url, {
+                waitUntil: 'networkidle0',
+                timeout: 30000
+            });
+
+            const standings = await this.page.evaluate((currentYear) => {
+                const data = {
+                    year: currentYear,
+                    afc: [],
+                    nfc: [],
+                    scrapingMethod: 'wikipedia-extraction'
+                };
+
+                // Look for standings tables
+                const tables = document.querySelectorAll('table.wikitable');
+                
+                tables.forEach(table => {
+                    const caption = table.querySelector('caption')?.textContent?.toLowerCase() || '';
+                    const prevHeading = table.previousElementSibling?.textContent?.toLowerCase() || '';
+                    
+                    if (caption.includes('standings') || prevHeading.includes('standings') || 
+                        caption.includes('afc') || caption.includes('nfc')) {
+                        
+                        const conference = caption.includes('afc') || prevHeading.includes('afc') ? 'afc' : 'nfc';
+                        
+                        const rows = table.querySelectorAll('tbody tr');
+                        rows.forEach((row, index) => {
+                            const cells = row.querySelectorAll('td');
+                            if (cells.length >= 4) {
+                                const teamLink = cells[0].querySelector('a');
+                                let teamName = teamLink ? teamLink.textContent.trim() : cells[0].textContent.trim();
+                                
+                                // Clean team name
+                                teamName = teamName.replace(/^\d+\.\s*/, '').replace(/\s*\([^)]*\)/, '').replace(/\s*[*†]+$/, '').trim();
+                                
+                                if (teamName && teamName.length > 2) {
+                                    const wins = parseInt(cells[1]?.textContent) || 0;
+                                    const losses = parseInt(cells[2]?.textContent) || 0;
+                                    const ties = parseInt(cells[3]?.textContent) || 0;
+                                    
+                                    const teamData = {
+                                        team: teamName,
+                                        wins: wins,
+                                        losses: losses,
+                                        ties: ties,
+                                        winPct: wins / (wins + losses + ties),
+                                        source: 'wikipedia'
+                                    };
+                                    
+                                    data[conference].push(teamData);
+                                }
+                            }
+                        });
+                    }
+                });
+
+                return data;
+            }, year);
+
+            return standings;
+        } catch (error) {
+            console.log(`❌ Wikipedia scraping failed for ${year}:`, error.message);
+            return { year: year, afc: [], nfc: [], scrapingMethod: 'wikipedia-failed' };
+        }
+    }
+
+    async scrapeProFootballReference(year) {
+        try {
+            console.log(`� Trying Pro Football Reference for ${year}...`);
+            const url = `https://www.pro-football-reference.com/years/${year}/`;
+            
+            await this.page.goto(url, {
+                waitUntil: 'networkidle0',
+                timeout: 30000
+            });
+
+            const standings = await this.page.evaluate((currentYear) => {
+                const data = {
+                    year: currentYear,
+                    afc: [],
+                    nfc: [],
+                    scrapingMethod: 'pro-football-reference'
+                };
+
+                // Look for AFC and NFC standings tables
+                ['AFC', 'NFC'].forEach(conference => {
+                    const table = document.querySelector(`#${conference.toLowerCase()}`);
+                    if (table) {
+                        const rows = table.querySelectorAll('tbody tr');
+                        rows.forEach(row => {
+                            const cells = row.querySelectorAll('td');
+                            if (cells.length >= 3) {
+                                const teamLink = cells[0].querySelector('a');
+                                const teamName = teamLink ? teamLink.textContent.trim() : cells[0].textContent.trim();
+                                
+                                if (teamName) {
+                                    const wins = parseInt(cells[1]?.textContent) || 0;
+                                    const losses = parseInt(cells[2]?.textContent) || 0;
+                                    const ties = parseInt(cells[3]?.textContent) || 0;
+                                    
+                                    data[conference.toLowerCase()].push({
+                                        team: teamName,
+                                        wins: wins,
+                                        losses: losses,
+                                        ties: ties,
+                                        winPct: wins / (wins + losses + ties),
+                                        source: 'pro-football-reference'
+                                    });
+                                }
+                            }
+                        });
+                    }
+                });
+
+                return data;
+            }, year);
+
+            return standings;
+        } catch (error) {
+            console.log(`❌ Pro Football Reference scraping failed for ${year}:`, error.message);
+            return { year: year, afc: [], nfc: [], scrapingMethod: 'pfr-failed' };
+        }
+    }
+
+    async scrapeNFLStandingsFromNFLCom(year) {
+        try {
+            console.log(`🏈 Trying NFL.com for ${year}...`);
             const url = `https://www.nfl.com/standings/conference/${year}/REG`;
-            console.log(`📊 Loading: ${url}`);
             
             await this.page.goto(url, {
                 waitUntil: 'networkidle0',
                 timeout: 45000
             });
 
-            // Wait for dynamic content to load
-            await new Promise(resolve => setTimeout(resolve, 8000));
+            // Wait for dynamic content to load - reduced delay
+            await this.page.waitForSelector('table, .standings-table', { timeout: 10000 });
             
             // Try to find and click any cookie/consent banners
             try {
                 const cookieButton = await this.page.$('button[aria-label*="Accept"], button:contains("Accept"), .accept-cookies');
                 if (cookieButton) {
                     await cookieButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    await this.page.waitForTimeout(500); // Minimal delay
                 }
             } catch (e) {
                 // Ignore cookie banner errors
             }
 
-            console.log('🔍 Extracting standings data...');
-            
-            // Extract standings data
+            // Extract standings data with all available columns
             const standings = await this.page.evaluate((currentYear) => {
                 const data = {
                     year: currentYear,
                     afc: [],
                     nfc: [],
-                    scrapingMethod: 'table-extraction'
+                    scrapingMethod: 'nfl-com-extraction'
                 };
 
                 // Helper function to clean team names
@@ -293,137 +441,197 @@ class EnhancedNFLScraperWithCSV {
                     return text.replace(/Go to|info page\.|\.$/g, '').replace(/\n/g, ' ').replace(/\s+/g, ' ').replace(/x[yz*]*\s*/g, '').trim();
                 }
 
-                // Helper function to parse decimal values
-                function parseDecimal(str) {
-                    if (!str) return 0;
-                    const cleaned = str.replace(/[^\d.-]/g, '');
-                    return parseFloat(cleaned) || 0;
+                // Helper function to parse numeric values
+                function parseNumeric(text) {
+                    if (!text || text === '-') return 0;
+                    const cleaned = text.replace(/[^\d.-]/g, '');
+                    const parsed = parseFloat(cleaned);
+                    return isNaN(parsed) ? 0 : parsed;
                 }
 
-                // Helper function to parse record strings (e.g., "7-2-0")
-                function parseRecord(recordStr) {
-                    if (!recordStr || typeof recordStr !== 'string') return { wins: 0, losses: 0, ties: 0 };
-                    const parts = recordStr.split('-').map(p => parseInt(p.trim()) || 0);
-                    return {
-                        wins: parts[0] || 0,
-                        losses: parts[1] || 0,
-                        ties: parts[2] || 0
-                    };
+                // Helper function to parse percentage values
+                function parsePercentage(text) {
+                    if (!text || text === '-') return 0;
+                    const cleaned = text.replace(/[^\d.]/g, '');
+                    const parsed = parseFloat(cleaned);
+                    return isNaN(parsed) ? 0 : parsed / 100;
                 }
 
-                // Look for team data in tables
-                const tables = document.querySelectorAll('table');
-                const teamData = [];
+                // Look for team data in tables - try multiple selectors
+                const selectors = [
+                    'table tbody tr',
+                    '.nfl-c-standings-table tbody tr',
+                    '[data-testid="standings-table"] tbody tr',
+                    '.standings-table tbody tr'
+                ];
 
-                tables.forEach((table, tableIndex) => {
-                    const rows = table.querySelectorAll('tr');
+                let headerColumns = [];
+                
+                for (const selector of selectors) {
+                    const table = document.querySelector(selector.replace(' tbody tr', ''));
+                    const rows = document.querySelectorAll(selector);
                     
-                    rows.forEach((row, rowIndex) => {
-                        const cells = row.querySelectorAll('td, th');
-                        
-                        if (cells.length >= 10) {
-                            const cellTexts = Array.from(cells).map(cell => cell.textContent.trim());
-                            
-                            // Check if this looks like a team standings row
-                            const hasTeamPattern = cellTexts.some(text => 
-                                ['Chiefs', 'Bills', 'Patriots', 'Cowboys', 'Packers', '49ers', 'Eagles', 'Ravens', 'Steelers', 'Dolphins', 'Bengals'].some(team => text.includes(team))
-                            );
-                            
-                            if (hasTeamPattern && cellTexts.length >= 10) {
-                                const teamName = cleanTeamName(cellTexts[0]);
-                                
-                                const teamRecord = {
-                                    team: teamName,
-                                    wins: parseInt(cellTexts[1]) || 0,
-                                    losses: parseInt(cellTexts[2]) || 0,
-                                    ties: parseInt(cellTexts[3]) || 0,
-                                    winPct: parseDecimal(cellTexts[4]),
-                                    pointsFor: parseInt(cellTexts[5]) || 0,
-                                    pointsAgainst: parseInt(cellTexts[6]) || 0,
-                                    netPoints: parseInt(cellTexts[7]) || 0,
-                                    
-                                    // Parse records from text
-                                    homeRecord: parseRecord(cellTexts[8]),
-                                    roadRecord: parseRecord(cellTexts[9]),
-                                    divisionRecord: parseRecord(cellTexts[10]),
-                                    conferenceRecord: parseRecord(cellTexts[11]),
-                                    nonConferenceRecord: parseRecord(cellTexts[12]),
-                                    
-                                    currentStreak: cellTexts[13] || '',
-                                    lastFiveGames: parseRecord(cellTexts[14]),
-                                    
-                                    // Calculated metrics
-                                    totalGames: (parseInt(cellTexts[1]) || 0) + (parseInt(cellTexts[2]) || 0) + (parseInt(cellTexts[3]) || 0),
-                                    pointDifferential: (parseInt(cellTexts[5]) || 0) - (parseInt(cellTexts[6]) || 0),
-                                    averagePointsFor: (parseInt(cellTexts[5]) || 0) / Math.max(1, (parseInt(cellTexts[1]) || 0) + (parseInt(cellTexts[2]) || 0) + (parseInt(cellTexts[3]) || 0)),
-                                    averagePointsAgainst: (parseInt(cellTexts[6]) || 0) / Math.max(1, (parseInt(cellTexts[1]) || 0) + (parseInt(cellTexts[2]) || 0) + (parseInt(cellTexts[3]) || 0)),
-                                    
-                                    // Win percentages
-                                    homeWinPct: cellTexts[8] ? parseRecord(cellTexts[8]).wins / Math.max(1, parseRecord(cellTexts[8]).wins + parseRecord(cellTexts[8]).losses + parseRecord(cellTexts[8]).ties) : 0,
-                                    roadWinPct: cellTexts[9] ? parseRecord(cellTexts[9]).wins / Math.max(1, parseRecord(cellTexts[9]).wins + parseRecord(cellTexts[9]).losses + parseRecord(cellTexts[9]).ties) : 0,
-                                    divisionWinPct: cellTexts[10] ? parseRecord(cellTexts[10]).wins / Math.max(1, parseRecord(cellTexts[10]).wins + parseRecord(cellTexts[10]).losses + parseRecord(cellTexts[10]).ties) : 0,
-                                    conferenceWinPct: cellTexts[11] ? parseRecord(cellTexts[11]).wins / Math.max(1, parseRecord(cellTexts[11]).wins + parseRecord(cellTexts[11]).losses + parseRecord(cellTexts[11]).ties) : 0,
-                                    
-                                    // Performance indicators
-                                    strongFinish: cellTexts[14] ? parseRecord(cellTexts[14]).wins >= 3 : false,
-                                    isOnWinStreak: cellTexts[13] ? cellTexts[13].includes('W') : false,
-                                    isOnLossStreak: cellTexts[13] ? cellTexts[13].includes('L') : false,
-                                    
-                                    // Metadata
-                                    rawData: cellTexts,
-                                    tableIndex: tableIndex,
-                                    rowIndex: rowIndex,
-                                    extractionMethod: 'enhanced-nfl-parameters'
-                                };
-
-                                teamData.push(teamRecord);
-                            }
+                    if (table && rows.length > 0) {
+                        // First, get the header columns to understand what data is available
+                        const headerRow = table.querySelector('thead tr, tr');
+                        if (headerRow) {
+                            const headers = headerRow.querySelectorAll('th, td');
+                            headerColumns = Array.from(headers).map(h => h.textContent.trim().toLowerCase());
+                            console.log('Found table headers:', headerColumns);
                         }
-                    });
-                });
+                        
+                        rows.forEach((row, index) => {
+                            const cells = row.querySelectorAll('td, th');
+                            if (cells.length >= 4) {
+                                const teamText = cells[0].textContent.trim();
+                                const teamName = cleanTeamName(teamText);
+                                
+                                if (teamName && teamName.length > 3) {
+                                    // Base team data - only extract what's actually in NFL.com table
+                                    const teamData = {
+                                        team: teamName,
+                                        wins: parseNumeric(cells[1]?.textContent),
+                                        losses: parseNumeric(cells[2]?.textContent),
+                                        ties: parseNumeric(cells[3]?.textContent),
+                                        source: 'nfl-com'
+                                    };
 
-                // Determine AFC vs NFC based on team names
-                const afcTeams = ['Kansas City Chiefs', 'Buffalo Bills', 'Baltimore Ravens', 'Houston Texans', 'Pittsburgh Steelers', 'Cleveland Browns', 'Cincinnati Bengals', 'Tennessee Titans', 'Jacksonville Jaguars', 'Indianapolis Colts', 'Miami Dolphins', 'New York Jets', 'Denver Broncos', 'Las Vegas Raiders', 'Los Angeles Chargers', 'New England Patriots'];
-                
-                teamData.forEach(team => {
-                    if (afcTeams.includes(team.team)) {
-                        data.afc.push(team);
-                    } else {
-                        data.nfc.push(team);
+                                    // Add winPct from table or calculate it
+                                    const totalGames = teamData.wins + teamData.losses + teamData.ties;
+                                    teamData.winPct = totalGames > 0 ? teamData.wins / totalGames : 0;
+
+                                    // Only extract columns that are actually present in NFL.com standings table
+                                    if (cells.length > 4) {
+                                        // PCT column (index 4)
+                                        if (cells[4]) teamData.pct = parsePercentage(cells[4].textContent);
+                                        
+                                        // PF - Points For (index 5)
+                                        if (cells[5]) teamData.pointsFor = parseNumeric(cells[5].textContent);
+                                        
+                                        // PA - Points Against (index 6)  
+                                        if (cells[6]) teamData.pointsAgainst = parseNumeric(cells[6].textContent);
+                                        
+                                        // Net Points (index 7)
+                                        if (cells[7]) {
+                                            teamData.netPoints = parseNumeric(cells[7].textContent);
+                                        } else if (teamData.pointsFor && teamData.pointsAgainst) {
+                                            teamData.netPoints = teamData.pointsFor - teamData.pointsAgainst;
+                                        }
+                                        
+                                        // Home record (index 8) - keep as string only
+                                        if (cells[8]) {
+                                            const homeText = cells[8].textContent.trim();
+                                            teamData.homeRecord = homeText;
+                                        }
+                                        
+                                        // Road record (index 9) - keep as string only
+                                        if (cells[9]) {
+                                            const roadText = cells[9].textContent.trim();
+                                            teamData.roadRecord = roadText;
+                                        }
+                                        
+                                        // Division record (index 10) - keep as string only
+                                        if (cells[10]) {
+                                            const divText = cells[10].textContent.trim();
+                                            teamData.divisionRecord = divText;
+                                        }
+                                        
+                                        // Conference record (index 11) - keep as string only
+                                        if (cells[11]) {
+                                            const confText = cells[11].textContent.trim();
+                                            teamData.conferenceRecord = confText;
+                                        }
+                                        
+                                        // Non-Conference record (index 12) - keep as string only
+                                        if (cells[12]) {
+                                            const nonConfText = cells[12].textContent.trim();
+                                            teamData.nonConferenceRecord = nonConfText;
+                                        }
+                                        
+                                        // Streak (index 13)
+                                        if (cells[13]) {
+                                            teamData.streak = cells[13].textContent.trim();
+                                        }
+                                        
+                                        // Last 5 games (index 14) - keep as string only
+                                        if (cells[14]) {
+                                            const last5Text = cells[14].textContent.trim();
+                                            teamData.last5 = last5Text;
+                                        }
+                                    }
+                                    
+                                    // Determine conference - try to identify from page context or position
+                                    let conference = 'nfc'; // default
+                                    
+                                    // Try to determine conference from page structure
+                                    const pageText = document.body.textContent.toLowerCase();
+                                    if (pageText.includes('afc')) {
+                                        // Look for AFC teams
+                                        const afcTeams = ['kansas city chiefs', 'buffalo bills', 'baltimore ravens', 'houston texans', 
+                                                         'pittsburgh steelers', 'cleveland browns', 'cincinnati bengals', 'tennessee titans',
+                                                         'jacksonville jaguars', 'indianapolis colts', 'miami dolphins', 'new york jets',
+                                                         'denver broncos', 'las vegas raiders', 'los angeles chargers', 'new england patriots'];
+                                        if (afcTeams.includes(teamName.toLowerCase())) {
+                                            conference = 'afc';
+                                        }
+                                    }
+                                    
+                                    data[conference].push(teamData);
+                                }
+                            }
+                        });
+                        break; // If we found data, stop trying other selectors
                     }
-                });
+                }
 
-                // Sort by wins then by point differential
-                data.afc.sort((a, b) => {
-                    if (b.wins !== a.wins) return b.wins - a.wins;
-                    return b.pointDifferential - a.pointDifferential;
-                });
+                // Add metadata about what columns were found
+                data.availableColumns = headerColumns;
+                console.log(`Extracted ${data.afc.length} AFC teams and ${data.nfc.length} NFC teams with columns:`, headerColumns.slice(0, 10));
                 
-                data.nfc.sort((a, b) => {
-                    if (b.wins !== a.wins) return b.wins - a.wins;
-                    return b.pointDifferential - a.pointDifferential;
-                });
-
                 return data;
-
             }, year);
 
-            console.log(`✅ ${year} standings extracted: ${standings.afc.length} AFC teams, ${standings.nfc.length} NFC teams`);
-            
-            // Display top teams from each conference
-            if (standings.afc.length > 0) {
-                console.log(`   AFC #1: ${standings.afc[0].team} (${standings.afc[0].wins}-${standings.afc[0].losses})`);
-            }
-            if (standings.nfc.length > 0) {
-                console.log(`   NFC #1: ${standings.nfc[0].team} (${standings.nfc[0].wins}-${standings.nfc[0].losses})`);
-            }
-
             return standings;
-
         } catch (error) {
-            console.error(`❌ Error scraping ${year} standings:`, error.message);
-            return { year: year, afc: [], nfc: [], error: error.message };
+            console.log(`❌ NFL.com scraping failed for ${year}:`, error.message);
+            return { year: year, afc: [], nfc: [], scrapingMethod: 'nfl-com-failed' };
         }
+    }
+
+    async ensureSuperBowlWinnerIncluded(year, standings) {
+        // Find the Super Bowl winner for this year
+        const superBowlWinner = this.data.superBowlWinners.find(sb => sb.year == year);
+        
+        if (superBowlWinner) {
+            const winnerName = superBowlWinner.winner;
+            
+            // Check if winner exists in AFC or NFC
+            const afcWinner = standings.afc.find(team => team.team === winnerName);
+            const nfcWinner = standings.nfc.find(team => team.team === winnerName);
+            
+            if (!afcWinner && !nfcWinner) {
+                console.log(`⚠️ Super Bowl winner ${winnerName} missing from ${year} standings, adding manually...`);
+                
+                // Add the missing Super Bowl winner
+                // Default to NFC, but you could enhance this logic
+                const conference = winnerName.includes('Kansas City') || winnerName.includes('Buffalo') || 
+                                  winnerName.includes('Pittsburgh') || winnerName.includes('Baltimore') ? 'afc' : 'nfc';
+                
+                standings[conference].push({
+                    team: winnerName,
+                    wins: 0, // Would need to scrape actual stats
+                    losses: 0,
+                    ties: 0,
+                    winPct: 0,
+                    source: 'superbowl-winner-manual-addition',
+                    note: 'Added because missing from scraped data'
+                });
+                
+                console.log(`✅ Added ${winnerName} to ${conference.toUpperCase()} standings`);
+            }
+        }
+        
+        return standings;
     }
 
     /**
@@ -436,9 +644,8 @@ class EnhancedNFLScraperWithCSV {
             const standings = await this.scrapeNFLStandingsForYear(year);
             this.data.conferenceStandings[year] = standings;
             
-            // Add delay between requests
-            console.log('⏱️  Waiting 3 seconds before next request...');
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            // No delay between requests for faster processing
+            console.log(`✅ Completed scraping for ${year}`);
         }
 
         // Now scrape division standings
@@ -460,8 +667,8 @@ class EnhancedNFLScraperWithCSV {
                 timeout: 45000
             });
 
-            // Wait for dynamic content to load
-            await new Promise(resolve => setTimeout(resolve, 8000));
+            // Wait for dynamic content to load - reduced delay
+            await this.page.waitForSelector('table, .standings-table', { timeout: 10000 });
             
             console.log('🔍 Extracting division standings data...');
             
@@ -612,9 +819,8 @@ class EnhancedNFLScraperWithCSV {
             const divisionStandings = await this.scrapeDivisionStandingsForYear(year);
             this.data.divisionStandings[year] = divisionStandings;
             
-            // Add delay between requests
-            console.log('⏱️  Waiting 2 seconds before next request...');
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // No delay for faster processing
+            console.log(`✅ Completed division standings for ${year}`);
         }
     }
 
@@ -790,142 +996,63 @@ class EnhancedNFLScraperWithCSV {
      * Export all data to ONE comprehensive CSV file for easier analysis
      */
     exportAllToCSV() {
-        console.log('\n🎯 EXPORTING ALL DATA TO ONE COMPREHENSIVE CSV FILE');
+        console.log('\n🎯 EXPORTING ONLY NFL.COM TABLE PARAMETERS + YEAR_WINNER TO CSV');
         console.log('=' * 60);
         
         try {
-            // Create one massive dataset with everything
+            // Create simplified dataset with only NFL.com table parameters
             const masterData = [];
+            const processedTeams = new Set(); // Track processed teams to avoid duplicates
             
-            // Process all teams with complete information
+            // Process all teams from conference standings with ONLY NFL.com table parameters
             Object.entries(this.data.conferenceStandings || {}).forEach(([year, yearData]) => {
                 ['afc', 'nfc'].forEach(conference => {
                     if (yearData[conference]) {
                         yearData[conference].forEach((team, index) => {
-                            // Check if this team won the Super Bowl
+                            // Track this team as processed
+                            processedTeams.add(`${year}-${team.team}`);
+                            
+                            // Check if this team won the Super Bowl this year
                             const superBowlWinner = this.data.superBowlWinners.find(sb => 
                                 sb.year == year && sb.winner === team.team
                             );
                             
-                            // Get division info if available
-                            let divisionInfo = { name: 'Unknown', rank: null, isLeader: false };
-                            const yearDivisions = this.data.divisionStandings[year];
-                            if (yearDivisions && yearDivisions.divisions) {
-                                Object.entries(yearDivisions.divisions).forEach(([divName, divTeams]) => {
-                                    const found = divTeams.find(dt => dt.team === team.team);
-                                    if (found) {
-                                        divisionInfo = { 
-                                            name: divName, 
-                                            rank: divTeams.indexOf(found) + 1, 
-                                            isLeader: found.isDivisionLeader || false 
-                                        };
-                                    }
-                                });
-                            }
+                            // Get the Super Bowl winner for this year
+                            const yearWinner = this.data.superBowlWinners.find(sb => sb.year == year);
+                            const year_winner_name = yearWinner ? yearWinner.winner : '';
                             
-                            // Create complete record with ALL information
-                            const masterRecord = {
-                                // Basic Info
+                            // Only include parameters actually present in NFL.com standings table
+                            const teamRecord = {
                                 year: parseInt(year),
                                 team: team.team,
                                 conference: conference.toUpperCase(),
-                                conference_rank: index + 1,
-                                division: divisionInfo.name,
-                                division_rank: divisionInfo.rank,
-                                is_division_leader: divisionInfo.isLeader ? 1 : 0,
-                                
-                                // Record & Performance
-                                wins: team.wins,
-                                losses: team.losses,
-                                ties: team.ties,
-                                total_games: team.totalGames || (team.wins + team.losses + team.ties),
-                                win_percentage: team.winPct,
-                                
-                                // Scoring
-                                points_for: team.pointsFor,
-                                points_against: team.pointsAgainst,
-                                net_points: team.netPoints,
-                                point_differential: team.pointDifferential,
-                                average_points_for: team.averagePointsFor,
-                                average_points_against: team.averagePointsAgainst,
-                                
-                                // Home Performance
-                                home_wins: team.homeRecord?.wins || 0,
-                                home_losses: team.homeRecord?.losses || 0,
-                                home_ties: team.homeRecord?.ties || 0,
-                                home_win_pct: team.homeWinPct,
-                                home_record: team.homeRecord ? `${team.homeRecord.wins}-${team.homeRecord.losses}-${team.homeRecord.ties}` : '0-0-0',
-                                
-                                // Road Performance
-                                road_wins: team.roadRecord?.wins || 0,
-                                road_losses: team.roadRecord?.losses || 0,
-                                road_ties: team.roadRecord?.ties || 0,
-                                road_win_pct: team.roadWinPct,
-                                road_record: team.roadRecord ? `${team.roadRecord.wins}-${team.roadRecord.losses}-${team.roadRecord.ties}` : '0-0-0',
-                                
-                                // Division Performance
-                                division_wins: team.divisionRecord?.wins || 0,
-                                division_losses: team.divisionRecord?.losses || 0,
-                                division_ties: team.divisionRecord?.ties || 0,
-                                division_win_pct: team.divisionWinPct,
-                                division_record: team.divisionRecord ? `${team.divisionRecord.wins}-${team.divisionRecord.losses}-${team.divisionRecord.ties}` : '0-0-0',
-                                
-                                // Conference Performance
-                                conference_wins: team.conferenceRecord?.wins || 0,
-                                conference_losses: team.conferenceRecord?.losses || 0,
-                                conference_ties: team.conferenceRecord?.ties || 0,
-                                conference_win_pct: team.conferenceWinPct,
-                                conference_record: team.conferenceRecord ? `${team.conferenceRecord.wins}-${team.conferenceRecord.losses}-${team.conferenceRecord.ties}` : '0-0-0',
-                                
-                                // Non-Conference Performance
-                                non_conference_wins: team.nonConferenceRecord?.wins || 0,
-                                non_conference_losses: team.nonConferenceRecord?.losses || 0,
-                                non_conference_ties: team.nonConferenceRecord?.ties || 0,
-                                non_conference_record: team.nonConferenceRecord ? `${team.nonConferenceRecord.wins}-${team.nonConferenceRecord.losses}-${team.nonConferenceRecord.ties}` : '0-0-0',
-                                
-                                // Recent Performance
-                                current_streak: team.currentStreak || '',
-                                last_five_wins: team.lastFiveGames?.wins || 0,
-                                last_five_losses: team.lastFiveGames?.losses || 0,
-                                last_five_ties: team.lastFiveGames?.ties || 0,
-                                last_five_record: team.lastFiveGames ? `${team.lastFiveGames.wins}-${team.lastFiveGames.losses}-${team.lastFiveGames.ties}` : '0-0-0',
-                                
-                                // Performance Indicators
-                                strong_finish: team.strongFinish ? 1 : 0,
-                                is_on_win_streak: team.isOnWinStreak ? 1 : 0,
-                                is_on_loss_streak: team.isOnLossStreak ? 1 : 0,
-                                
-                                // Super Bowl Information
-                                won_superbowl: superBowlWinner ? 1 : 0,
-                                superbowl_roman: superBowlWinner ? superBowlWinner.superBowl : '',
-                                superbowl_date: superBowlWinner ? superBowlWinner.date : '',
-                                superbowl_opponent: superBowlWinner ? superBowlWinner.loser : '',
-                                superbowl_score: superBowlWinner ? superBowlWinner.score : '',
-                                superbowl_season: superBowlWinner ? superBowlWinner.season : '',
-                                
-                                // Calculated Advanced Metrics
-                                point_diff_per_game: team.totalGames > 0 ? (team.pointDifferential / team.totalGames).toFixed(2) : 0,
-                                home_road_diff: team.homeWinPct - team.roadWinPct,
-                                offensive_efficiency: team.pointsFor > 0 ? (team.pointsFor / team.totalGames).toFixed(1) : 0,
-                                defensive_efficiency: team.pointsAgainst > 0 ? (team.pointsAgainst / team.totalGames).toFixed(1) : 0,
-                                is_balanced_team: Math.abs(team.homeWinPct - team.roadWinPct) < 0.2 ? 1 : 0,
-                                is_elite_offense: team.pointsFor > 450 ? 1 : 0,
-                                is_elite_defense: team.pointsAgainst < 300 ? 1 : 0,
-                                playoff_seed_estimate: index + 1,
-                                
-                                // Meta Information
-                                data_source: 'comprehensive_scrape',
-                                scrape_year: new Date().getFullYear(),
-                                table_index: team.tableIndex,
-                                row_index: team.rowIndex,
-                                extraction_method: team.extractionMethod
+                                wins: team.wins || 0,
+                                losses: team.losses || 0,
+                                ties: team.ties || 0,
+                                winPct: team.winPct || 0,
+                                pct: team.pct || team.winPct || 0,
+                                pointsFor: team.pointsFor || 0,
+                                pointsAgainst: team.pointsAgainst || 0,
+                                netPoints: team.netPoints || 0,
+                                homeRecord: team.homeRecord || '',
+                                roadRecord: team.roadRecord || '',
+                                divisionRecord: team.divisionRecord || '',
+                                conferenceRecord: team.conferenceRecord || '',
+                                nonConferenceRecord: team.nonConferenceRecord || '',
+                                streak: team.streak || '',
+                                last5: team.last5 || '',
+                                year_winner: superBowlWinner ? 1 : 0,
+                                year_winner_name: year_winner_name
                             };
                             
-                            masterData.push(masterRecord);
+                            masterData.push(teamRecord);
                         });
                     }
                 });
             });
+
+            // Ensure all Super Bowl winners are included
+            this.ensureSuperBowlWinnersIncluded(masterData, processedTeams);
 
             // Sort by year, then by conference, then by wins
             masterData.sort((a, b) => {
@@ -935,38 +1062,41 @@ class EnhancedNFLScraperWithCSV {
             });
 
             if (masterData.length > 0) {
-                const masterCSV = this.arrayToCSV(masterData);
+                // Clean the data by removing columns with only undefined/NaN/empty values
+                const cleanedData = this.cleanCSVData(masterData);
+                
+                const masterCSV = this.arrayToCSV(cleanedData);
                 this.saveCSV('NFL_COMPLETE_ANALYSIS.csv', masterCSV);
                 
-                console.log('\n🎉 SINGLE COMPREHENSIVE CSV FILE CREATED!');
+                console.log('\n🎉 SIMPLIFIED CSV FILE CREATED WITH ONLY NFL.COM TABLE PARAMETERS!');
                 console.log(`📁 File: ${this.csvDirectory}NFL_COMPLETE_ANALYSIS.csv`);
-                console.log(`� Total Records: ${masterData.length}`);
+                console.log(`📊 Total Records: ${cleanedData.length}`);
                 
                 // Show summary stats
-                const years = [...new Set(masterData.map(t => t.year))];
-                const superBowlWinners = masterData.filter(t => t.won_superbowl === 1);
-                const divisions = [...new Set(masterData.map(t => t.division).filter(d => d !== 'Unknown'))];
+                const years = [...new Set(cleanedData.map(t => t.year))];
+                const superBowlWinners = cleanedData.filter(t => t.year_winner === 1);
                 
                 console.log(`\n📈 DATA SUMMARY:`);
                 console.log(`   Years: ${years.join(', ')}`);
-                console.log(`   Teams: ${[...new Set(masterData.map(t => t.team))].length}`);
+                console.log(`   Teams: ${[...new Set(cleanedData.map(t => t.team))].length}`);
                 console.log(`   Super Bowl Winners: ${superBowlWinners.length}`);
-                console.log(`   Divisions: ${divisions.length}`);
-                console.log(`   Total Columns: ${Object.keys(masterData[0]).length}`);
+                console.log(`   Total Columns: ${Object.keys(cleanedData[0]).length}`);
                 
                 console.log(`\n🏆 SUPER BOWL WINNERS IN FILE:`);
                 superBowlWinners.forEach(winner => {
-                    console.log(`   ${winner.year}: ${winner.team} (${winner.wins}-${winner.losses}, ${winner.point_differential > 0 ? '+' : ''}${winner.point_differential} pt diff)`);
+                    console.log(`   ${winner.year}: ${winner.team} (${winner.wins}-${winner.losses}, ${winner.netPoints > 0 ? '+' : ''}${winner.netPoints} net pts)`);
                 });
                 
-                console.log(`\n🎯 READY FOR ANALYSIS!`);
-                console.log(`   This single file contains ALL data needed for prediction modeling:`);
-                console.log(`   • Team performance metrics`);
-                console.log(`   • Super Bowl winner flags`);
-                console.log(`   • Home/road splits`);
-                console.log(`   • Division/conference records`);
-                console.log(`   • Advanced calculated metrics`);
-                console.log(`   • Historical patterns`);
+                console.log(`\n🎯 CSV CONTAINS ONLY NFL.COM PARAMETERS:`);
+                console.log(`   • Team, Year, Conference`);
+                console.log(`   • Wins, Losses, Ties, Win PCT`);
+                console.log(`   • Points For, Points Against, Net Points`);
+                console.log(`   • Home Record, Road Record`);
+                console.log(`   • Division Record, Conference Record, Non-Conference Record`);
+                console.log(`   • Streak, Last 5 Games`);
+                console.log(`   • year_winner (1 if Super Bowl winner, 0 if not)`);
+                console.log(`   • year_winner_name (name of Super Bowl winner for each year)`);
+                console.log(`   • NO derived statistics or calculated fields`);
                 
             } else {
                 console.log('⚠️ No data to export');
@@ -975,6 +1105,51 @@ class EnhancedNFLScraperWithCSV {
         } catch (error) {
             console.error('❌ Error during CSV export:', error.message);
         }
+    }
+
+    /**
+     * Ensure Super Bowl winners are included in the CSV export
+     */
+    ensureSuperBowlWinnersIncluded(masterData, processedTeams) {
+        // CRITICAL FIX: Ensure all Super Bowl winners are included even if missing from standings
+        console.log('\n🔍 Checking for missing Super Bowl winners...');
+        
+        this.data.superBowlWinners.forEach(sb => {
+            const teamKey = `${sb.year}-${sb.winner}`;
+            
+            if (!processedTeams.has(teamKey)) {
+                console.log(`⚠️ MISSING Super Bowl winner found: ${sb.winner} (${sb.year}) - Adding manually`);
+                
+                // Create a simplified record for the missing Super Bowl winner with NFL.com table parameters
+                const missingWinnerRecord = {
+                    year: parseInt(sb.year),
+                    team: sb.winner,
+                    conference: sb.winner.includes('Chiefs') || sb.winner.includes('Bills') || 
+                               sb.winner.includes('Ravens') || sb.winner.includes('Steelers') || 
+                               sb.winner.includes('Bengals') || sb.winner.includes('Patriots') ? 'AFC' : 'NFC',
+                    wins: 0,
+                    losses: 0,
+                    ties: 0, 
+                    winPct: 0,
+                    pointsFor: 0,
+                    pointsAgainst: 0,
+                    netPoints: 0,
+                    homeRecord: '',
+                    roadRecord: '',
+                    divisionRecord: '',
+                    conferenceRecord: '',
+                    nonConferenceRecord: '',
+                    streak: '',
+                    last5: '',
+                    year_winner: 1,
+                    year_winner_name: sb.winner
+                };
+                
+                masterData.push(missingWinnerRecord);
+            }
+        });
+        
+        return masterData;
     }
 
     /**
@@ -1053,14 +1228,17 @@ class EnhancedNFLScraperWithCSV {
         });
 
         if (comprehensiveData.length > 0) {
-            const comprehensiveCSV = this.arrayToCSV(comprehensiveData);
+            // Clean the data by removing columns with only undefined/NaN/empty values
+            const cleanedComprehensiveData = this.cleanCSVData(comprehensiveData);
+            
+            const comprehensiveCSV = this.arrayToCSV(cleanedComprehensiveData);
             this.saveCSV('comprehensive_team_performance.csv', comprehensiveCSV);
-            console.log(`✅ Comprehensive team performance CSV created (${comprehensiveData.length} team records)`);
+            console.log(`✅ Comprehensive team performance CSV created (${cleanedComprehensiveData.length} team records)`);
             
             // Show summary stats
-            const superBowlWinners = comprehensiveData.filter(t => t.won_superbowl === 1);
+            const superBowlWinners = cleanedComprehensiveData.filter(t => t.won_superbowl === 1);
             console.log(`   🏆 Super Bowl winners in dataset: ${superBowlWinners.length}`);
-            console.log(`   📊 Years covered: ${[...new Set(comprehensiveData.map(t => t.year))].join(', ')}`);
+            console.log(`   📊 Years covered: ${[...new Set(cleanedComprehensiveData.map(t => t.year))].join(', ')}`);
         } else {
             console.log('⚠️ No comprehensive team data to export');
         }
@@ -1156,6 +1334,62 @@ class EnhancedNFLScraperWithCSV {
             console.log(`   📈 Pattern analysis includes ${this.data.analysis.patterns.totalSuperBowls} championships`);
             console.log(`   🏆 Division leaders who won: ${this.data.analysis.patterns.divisionWinnersCount}/${this.data.analysis.patterns.totalSuperBowls}`);
         }
+    }
+
+    /**
+     * Clean CSV data by removing columns where all values are undefined, empty, "NaN", or similar invalid values
+     */
+    cleanCSVData(data) {
+        if (!data || data.length === 0) {
+            return data;
+        }
+        
+        const headers = Object.keys(data[0]);
+        const columnsToKeep = [];
+        const columnsToRemove = [];
+        
+        // Check each column to see if all values are invalid
+        headers.forEach(header => {
+            const columnValues = data.map(row => row[header]);
+            
+            // Check if all values in this column are undefined, "undefined-undefined-undefined", "NaN", or empty
+            const allInvalid = columnValues.every(value => {
+                if (value === null || value === undefined) return true;
+                
+                const stringValue = String(value).trim();
+                return (
+                    stringValue === '' ||
+                    stringValue === 'undefined' ||
+                    stringValue === 'undefined-undefined-undefined' ||
+                    stringValue === 'NaN' ||
+                    stringValue === 'null' ||
+                    stringValue === '0' && header.includes('record') && stringValue === '0-0-0' // Keep 0-0-0 records
+                );
+            });
+            
+            if (allInvalid) {
+                columnsToRemove.push(header);
+            } else {
+                columnsToKeep.push(header);
+            }
+        });
+        
+        console.log(`🧹 CSV Cleaning: Removing ${columnsToRemove.length} columns with only invalid values`);
+        if (columnsToRemove.length > 0) {
+            console.log(`   Removed columns: ${columnsToRemove.slice(0, 5).join(', ')}${columnsToRemove.length > 5 ? ` and ${columnsToRemove.length - 5} more` : ''}`);
+        }
+        
+        // Create cleaned data with only valid columns
+        const cleanedData = data.map(row => {
+            const cleanedRow = {};
+            columnsToKeep.forEach(header => {
+                cleanedRow[header] = row[header];
+            });
+            return cleanedRow;
+        });
+        
+        console.log(`✅ CSV Cleaning complete: Kept ${columnsToKeep.length} columns with valid data`);
+        return cleanedData;
     }
 
     /**
